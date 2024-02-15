@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "CLG_log.h"
+
 #include "MEM_guardedalloc.h"
 
 #include "DNA_scene_types.h"
@@ -20,6 +22,7 @@
 #include "DNA_workspace_types.h"
 
 #include "BLI_fileops.h"
+#include "BLI_function_ref.hh"
 #include "BLI_listbase.h"
 #include "BLI_path_util.h"
 #include "BLI_string.h"
@@ -1443,6 +1446,355 @@ void BKE_blendfile_workspace_config_data_free(WorkspaceConfigFileData *workspace
 /* -------------------------------------------------------------------- */
 /** \name Blend File Write (Partial)
  * \{ */
+
+static CLG_LogRef LOG_PARTIALWRITE = {"bke.blendfile.partial_write"};
+
+namespace blender::bke::blendfile {
+
+PartialWriteContext::PartialWriteContext()
+{
+  memset(this, 0, sizeof(Main));
+  BKE_main_init(*this);
+  /* Only for IDs matching existing data in current G_MAIN. */
+  matching_uid_map_ = BKE_main_idmap_create(this, false, nullptr, MAIN_IDMAP_TYPE_UID);
+  /* For all IDs existing in the context. */
+  this->id_map = BKE_main_idmap_create(
+      this, false, nullptr, MAIN_IDMAP_TYPE_UID | MAIN_IDMAP_TYPE_NAME);
+};
+
+PartialWriteContext::~PartialWriteContext()
+{
+  BKE_main_idmap_destroy(matching_uid_map_);
+
+  BLI_assert(this->next == nullptr);
+  BKE_main_destroy(*this);
+};
+
+void PartialWriteContext::preempt_session_uid_(ID *ctx_id, unsigned int session_uid)
+{
+  /* If there is already an existing ID in the 'matching' set with that UID, it should be the same
+   * as the given ctx_id. */
+  ID *matching_ctx_id = BKE_main_idmap_lookup_uid(matching_uid_map_, session_uid);
+  if (matching_ctx_id == ctx_id) {
+    /* That ID has already been added to the context, nothing to do. */
+    BLI_assert(matching_ctx_id->session_uid == session_uid);
+    return;
+  }
+  if (matching_ctx_id != nullptr) {
+    /* Another ID in the context, who has a matching ID in current G_MAIN, is sharing the same
+     * session UID. This mark a critical corruption somewhere! */
+    CLOG_FATAL(
+        &LOG_PARTIALWRITE,
+        "Different matching IDs sharing the same session UID in the partial write context.");
+    return;
+  }
+  /* No ID with this session UID in the context, who's matching a current ID in G_MAIN. Check if a
+   * non-matching context ID is already using that UID, if yes, regenerate a new one for it, such
+   * that given `ctx_id` can use the desired UID. */
+  /* NOTE: In theory, there should never be any session uid collision currently, since these are
+   * generated session-wide, regardless of the type/source of the IDs. */
+  matching_ctx_id = BKE_main_idmap_lookup_uid(this->id_map, session_uid);
+  BLI_assert(matching_ctx_id != ctx_id);
+  if (matching_ctx_id) {
+    CLOG_WARN(&LOG_PARTIALWRITE,
+              "Non-matching IDs sharing the same session UID in the partial write context.");
+    BKE_main_idmap_remove_id(this->id_map, matching_ctx_id);
+    BKE_lib_libblock_session_uid_renew(matching_ctx_id);
+    BKE_main_idmap_insert_id(this->id_map, matching_ctx_id);
+    BLI_assert(BKE_main_idmap_lookup_uid(this->id_map, session_uid) == nullptr);
+  }
+  ctx_id->session_uid = session_uid;
+}
+
+ID *PartialWriteContext::id_add_copy_(const ID *id, const bool regenerate_session_uid)
+{
+  ID *ctx_root_id = nullptr;
+  BLI_assert(BKE_main_idmap_lookup_uid(matching_uid_map_, id->session_uid) == nullptr);
+  ctx_root_id = BKE_id_copy_in_lib(nullptr,
+                                   id->lib,
+                                   id,
+                                   nullptr,
+                                   nullptr,
+                                   (LIB_ID_CREATE_NO_MAIN | LIB_ID_CREATE_NO_USER_REFCOUNT));
+  ctx_root_id->tag |= LIB_TAG_TEMP_MAIN;
+  if (regenerate_session_uid) {
+    /* Callling #BKE_lib_libblock_session_uid_renew is not needed here, copying already generated a
+     * new one. */
+    BLI_assert(BKE_main_idmap_lookup_uid(matching_uid_map_, id->session_uid) == nullptr);
+  }
+  else {
+    preempt_session_uid_(ctx_root_id, id->session_uid);
+    BKE_main_idmap_insert_id(matching_uid_map_, ctx_root_id);
+  }
+  BKE_main_idmap_insert_id(this->id_map, ctx_root_id);
+  BKE_libblock_management_main_add(this, ctx_root_id);
+  return ctx_root_id;
+}
+
+void PartialWriteContext::ensure_library_(ID *ctx_id)
+{
+  if (!ID_IS_LINKED(ctx_id)) {
+    return;
+  }
+  blender::StringRefNull lib_path = ctx_id->lib->runtime.filepath_abs;
+  Library *ctx_lib = this->libraries_map_.lookup_default(lib_path, nullptr);
+  if (!ctx_lib) {
+    ctx_lib = reinterpret_cast<Library *>(id_add_copy_(&ctx_id->lib->id, true));
+  }
+  ctx_id->lib = ctx_lib;
+}
+
+ID *PartialWriteContext::id_add(
+    const ID *id,
+    PartialWriteContext::AddIDOptions options,
+    blender::FunctionRef<PartialWriteContext::AddIDOptions(
+        LibraryIDLinkCallbackData *cb_data, PartialWriteContext::AddIDOptions options)>
+        dependencies_filter_cb)
+{
+  constexpr int make_local_flags = LIB_ID_MAKELOCAL_FORCE_LOCAL |
+                                   LIB_ID_MAKELOCAL_LIBOVERRIDE_CLEAR;
+
+  const bool add_dependencies = (options & ADD_DEPENDENCIES) != 0;
+  const bool clear_dependencies = (options & CLEAR_DEPENDENCIES) != 0;
+  const bool duplicate_dependencies = (options & DUPLICATE_DEPENDENCIES) != 0;
+  BLI_assert(clear_dependencies || add_dependencies);
+  BLI_assert(!clear_dependencies || !(add_dependencies || duplicate_dependencies));
+
+  /* The given ID may have already been added (either explicitely or as a dependency) before. */
+  ID *ctx_root_id = BKE_main_idmap_lookup_uid(matching_uid_map_, id->session_uid);
+  if (ctx_root_id) {
+    /* If the root orig ID is already in the context, assume all of its dependencies are as well.
+     */
+    BLI_assert(ctx_root_id->session_uid == id->session_uid);
+    /* Explicitely added IDs get a fake user, to ensure that they are kept unless explicitely
+     * removed. */
+    id_fake_user_set(ctx_root_id);
+    return ctx_root_id;
+  }
+
+  /* Local mapping, such that even in case dependencies are duplicated for this specific added ID,
+   * once a dependency has been duplicated, it can be re-used for other ID usages within the
+   * dependencies of the added ID. */
+  blender::Map<const ID *, ID *> local_ctx_id_map;
+  /* A list of IDs to post-process. Only contains IDs that were actually added to the context (not
+   * the ones that were already there and were re-used). The #AddIDOptions item of the pair stores
+   * the returned value from the given #dependencies_filter_cb (or given global #options parameter
+   * otherwise). */
+  blender::Vector<std::pair<ID *, PartialWriteContext::AddIDOptions>> post_process_ids_todo;
+
+  ctx_root_id = id_add_copy_(id, false);
+  BLI_assert(ctx_root_id->session_uid == id->session_uid);
+  local_ctx_id_map.add(id, ctx_root_id);
+  post_process_ids_todo.append({ctx_root_id, options});
+  /* Explicitely added IDs get a fake user, to ensure that they are kept unless explicitely
+   * removed. */
+  id_fake_user_set(ctx_root_id);
+
+  blender::Set<ID *> ids_to_process{ctx_root_id};
+  auto dependencies_cb = [this,
+                          options,
+                          &local_ctx_id_map,
+                          &ids_to_process,
+                          &post_process_ids_todo,
+                          dependencies_filter_cb](LibraryIDLinkCallbackData *cb_data) -> int {
+    ID **id_ptr = cb_data->id_pointer;
+    const ID *orig_deps_id = *id_ptr;
+
+    PartialWriteContext::AddIDOptions options_final = options;
+    if (dependencies_filter_cb) {
+      PartialWriteContext::AddIDOptions options_per_id = dependencies_filter_cb(cb_data, options);
+      options_final = PartialWriteContext::AddIDOptions(
+          (options_per_id & ~DUPLICATE_DEPENDENCIES) | (options & DUPLICATE_DEPENDENCIES));
+    }
+
+    const bool add_dependencies = (options_final & ADD_DEPENDENCIES) != 0;
+    const bool clear_dependencies = (options_final & CLEAR_DEPENDENCIES) != 0;
+    const bool duplicate_dependencies = (options_final & DUPLICATE_DEPENDENCIES) != 0;
+    BLI_assert(clear_dependencies || add_dependencies);
+    BLI_assert(!clear_dependencies || !(add_dependencies || duplicate_dependencies));
+
+    if (clear_dependencies) {
+      if (cb_data->cb_flag & IDWALK_CB_NEVER_NULL) {
+        CLOG_WARN(&LOG_PARTIALWRITE,
+                  "Clearing a 'never null' ID usage of '%s' by '%s', this is likely not a "
+                  "desired action",
+                  (*id_ptr)->name,
+                  cb_data->owner_id->name);
+      }
+      /* Owner ID should be a 'context-main' duplicate of a real Main ID, as such there should be
+       * no need to decrease ID usages refcount here. */
+      *id_ptr = nullptr;
+      return IDWALK_RET_NOP;
+    }
+    else {  // if (add_dependencies)
+      /* The given ID may have already been added (either explicitely or as a dependency) before.
+       */
+      ID *ctx_deps_id = nullptr;
+      if (duplicate_dependencies) {
+        ctx_deps_id = local_ctx_id_map.lookup(orig_deps_id);
+      }
+      else {
+        ctx_deps_id = BKE_main_idmap_lookup_uid(matching_uid_map_, orig_deps_id->session_uid);
+      }
+      if (!ctx_deps_id) {
+        ctx_deps_id = this->id_add_copy_(orig_deps_id, duplicate_dependencies);
+        local_ctx_id_map.add(orig_deps_id, ctx_deps_id);
+        ids_to_process.add(ctx_deps_id);
+        post_process_ids_todo.append({ctx_deps_id, options_final});
+        /* Added dependencies IDs get an 'ensured' user, which will ensure that they are written on
+         * disk, but won't prevent their deletion if not actually used. */
+        id_us_ensure_real(ctx_deps_id);
+      }
+      if (duplicate_dependencies) {
+        BLI_assert(ctx_deps_id->session_uid != orig_deps_id->session_uid);
+      }
+      else {
+        BLI_assert(ctx_deps_id->session_uid == orig_deps_id->session_uid);
+      }
+      return IDWALK_RET_NOP;
+    }
+  };
+  while (std::optional<ID *> ctx_id = ids_to_process.pop()) {
+    BKE_library_foreach_ID_link(this, *ctx_id, dependencies_cb, &options, IDWALK_NOP);
+  }
+
+  /* Post process all newly added IDs in the context:
+   *   - Make them local or ensure that their library reference is also in the context.
+   */
+  for (auto [ctx_id, options_final] : post_process_ids_todo) {
+    const bool make_local = (options_final & MAKE_LOCAL) != 0;
+    if (make_local) {
+      /* NOTE: Cannot use #BKE_lib_id_make_local here, as it would call #BKE_lib_id_expand_local,
+       * which could */
+      BKE_lib_id_clear_library_data(this, ctx_root_id, make_local_flags);
+      BKE_lib_override_library_make_local(this, ctx_root_id);
+    }
+    else {
+      ensure_library_(ctx_id);
+    }
+  }
+
+  return ctx_root_id;
+}
+
+void PartialWriteContext::id_remove(const ID *id)
+{
+  if (ID *ctx_id = BKE_main_idmap_lookup_uid(matching_uid_map_, id->session_uid)) {
+    BKE_main_idmap_remove_id(matching_uid_map_, ctx_id);
+    BKE_id_delete(this, ctx_id);
+  }
+}
+
+void PartialWriteContext::remove_unused(void)
+{
+  LibQueryUnusedIDsData parameters;
+  parameters.do_local_ids = true;
+  parameters.do_linked_ids = true;
+  parameters.do_recursive = true;
+
+  BKE_main_id_tag_all(this, LIB_TAG_DOIT, false);
+  BKE_lib_query_unused_ids_tag(this, LIB_TAG_DOIT, parameters);
+
+  CLOG_INFO(&LOG_PARTIALWRITE,
+            3,
+            "Removing %d unused IDs from current partial write context",
+            parameters.num_total[INDEX_ID_NULL]);
+  ID *id_iter;
+  FOREACH_MAIN_ID_BEGIN (this, id_iter) {
+    if ((id_iter->tag & LIB_TAG_DOIT) != 0) {
+      BKE_main_idmap_remove_id(matching_uid_map_, id_iter);
+    }
+  }
+  FOREACH_MAIN_ID_END;
+  BKE_id_multi_tagged_delete(this);
+}
+
+void PartialWriteContext::clear(void)
+{
+  BKE_main_idmap_clear(*matching_uid_map_);
+  BKE_main_clear(*this);
+}
+
+bool PartialWriteContext::is_valid(void)
+{
+  blender::Set<ID *> ids_in_context;
+  blender::Set<uint> session_uids_in_context;
+  bool is_valid = true;
+
+  ID *id_iter;
+
+  /* Fill `ids_in_context`, check uniqueness of session_uid's. */
+  FOREACH_MAIN_ID_BEGIN (this, id_iter) {
+    ids_in_context.add(id_iter);
+    if (session_uids_in_context.contains(id_iter->session_uid)) {
+      CLOG_ERROR(&LOG_PARTIALWRITE, "ID %s does not have a unique session_uid", id_iter->name);
+      is_valid = false;
+    }
+    else {
+      session_uids_in_context.add(id_iter->session_uid);
+    }
+  }
+  FOREACH_MAIN_ID_END;
+
+  /* Check that no ID uses IDs from outside this context. */
+  auto id_validate_dependencies_cb = [&ids_in_context,
+                                      &is_valid](LibraryIDLinkCallbackData *cb_data) -> int {
+    ID **id_p = cb_data->id_pointer;
+    ID *owner_id = cb_data->owner_id;
+    ID *self_id = cb_data->self_id;
+
+    /* By definition, embedded IDs are not in Main, so they are not listed in this context either.
+     */
+    if (cb_data->cb_flag & (IDWALK_CB_EMBEDDED | IDWALK_CB_EMBEDDED_NOT_OWNING)) {
+      return IDWALK_RET_NOP;
+    }
+
+    if (*id_p && !ids_in_context.contains(*id_p)) {
+      if (owner_id != self_id) {
+        CLOG_ERROR(
+            &LOG_PARTIALWRITE,
+            "ID %s (used by ID '%s', embedded ID '%s') is not in current partial write context",
+            (*id_p)->name,
+            owner_id->name,
+            self_id->name);
+      }
+      else {
+        CLOG_ERROR(&LOG_PARTIALWRITE,
+                   "ID %s (used by ID '%s') is not in current partial write context",
+                   (*id_p)->name,
+                   owner_id->name);
+      }
+      is_valid = false;
+    }
+    return IDWALK_RET_NOP;
+  };
+  FOREACH_MAIN_ID_BEGIN (this, id_iter) {
+    BKE_library_foreach_ID_link(
+        this, id_iter, id_validate_dependencies_cb, nullptr, IDWALK_READONLY);
+  }
+  FOREACH_MAIN_ID_END;
+
+  return is_valid;
+}
+
+bool PartialWriteContext::write(const char *write_filepath,
+                                const int write_flags,
+                                const int remap_mode,
+                                ReportList &reports)
+{
+  BLI_assert(this->is_valid());
+
+  BlendFileWriteParams blend_file_write_params{};
+  blend_file_write_params.remap_mode = eBLO_WritePathRemap(remap_mode);
+  return BLO_write_file(this, write_filepath, write_flags, &blend_file_write_params, &reports);
+}
+
+bool PartialWriteContext::write(const char *write_filepath, ReportList &reports)
+{
+  return this->write(write_filepath, 0, BLO_WRITE_PATH_REMAP_RELATIVE, reports);
+}
+
+}  // namespace blender::bke::blendfile
 
 static void blendfile_write_partial_clear_flags(Main *bmain_src)
 {

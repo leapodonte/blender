@@ -60,35 +60,11 @@
 /* Own include. */
 #include "sequencer_intern.hh"
 
+using namespace blender::bke;
+
 /* -------------------------------------------------------------------- */
 /* Copy Operator Helper functions
  */
-
-static int gather_strip_data_ids_to_null(LibraryIDLinkCallbackData *cb_data)
-{
-  blender::bke::id::IDRemapper &id_remapper = *static_cast<blender::bke::id::IDRemapper *>(
-      cb_data->user_data);
-  ID *id = *cb_data->id_pointer;
-
-  /* We don't care about embedded, loop-back, or internal IDs. */
-  if (cb_data->cb_flag & (IDWALK_CB_EMBEDDED | IDWALK_CB_EMBEDDED_NOT_OWNING)) {
-    return IDWALK_RET_NOP;
-  }
-  if (cb_data->cb_flag & (IDWALK_CB_LOOPBACK | IDWALK_CB_INTERNAL)) {
-    return IDWALK_RET_STOP_RECURSION;
-  }
-
-  if (id) {
-    ID_Type id_type = GS((id)->name);
-    /* Nullify everything that is not:
-     * #bSound, #MovieClip, #Image, #Text, #VFont, #bAction, or #Collection IDs. */
-    if (!ELEM(id_type, ID_SO, ID_MC, ID_IM, ID_TXT, ID_VF, ID_AC)) {
-      id_remapper.add(id, nullptr);
-      return IDWALK_RET_STOP_RECURSION;
-    }
-  }
-  return IDWALK_RET_NOP;
-}
 
 static void sequencer_copy_animation_listbase(Scene *scene_src,
                                               Sequence *seq_dst,
@@ -134,18 +110,20 @@ static void sequencer_copybuffer_filepath_get(char filepath[FILE_MAX], size_t fi
   BLI_path_join(filepath, filepath_maxncpy, BKE_tempdir_base(), "copybuffer_vse.blend");
 }
 
-static bool sequencer_write_copy_paste_file(Main *bmain_src,
+static bool sequencer_write_copy_paste_file(Main * /*bmain_src*/,
                                             Scene *scene_src,
                                             const char *filepath,
-                                            ReportList *reports)
+                                            ReportList &reports)
 
 {
-  /* Ideally, scene should not be added to the global Main. There currently is no good
-   * solution to avoid it if we want to properly pull in all strip dependencies. */
-  Scene *scene_dst = BKE_scene_add(bmain_src, "copybuffer_vse_scene");
+  blendfile::PartialWriteContext copy_buffer{};
 
-  /* Create a temporary scene that we will copy from.
-   * This is needed as it is the scene that contains all the sequence-strip data. */
+  /* Add a dummy empty scene to the temporary Main copy buffer. */
+  Scene *scene_dst = BKE_scene_add(&copy_buffer, "copybuffer_vse_scene");
+  id_fake_user_set(&scene_dst->id);
+  scene_dst->id.flag |= LIB_CLIPBOARD_MARK;
+
+  /* Create an empty sequence editor data to store all copied strips. */
   scene_dst->ed = MEM_cnew<Editing>(__func__);
   scene_dst->ed->seqbasep = &scene_dst->ed->seqbase;
   SEQ_sequence_base_dupli_recursive(
@@ -174,39 +152,58 @@ static bool sequencer_write_copy_paste_file(Main *bmain_src,
 
   if (!BLI_listbase_is_empty(&fcurves_dst) || !BLI_listbase_is_empty(&drivers_dst)) {
     BLI_assert(scene_dst->adt == nullptr);
-    bAction *act_dst = blender::animrig::id_action_ensure(bmain_src, &scene_dst->id);
+    bAction *act_dst = blender::animrig::id_action_ensure(&copy_buffer, &scene_dst->id);
     BLI_movelisttolist(&act_dst->curves, &fcurves_dst);
     BLI_movelisttolist(&scene_dst->adt->drivers, &drivers_dst);
   }
 
-  /* Nullify all ID pointers that we don't want to copy. For example, we don't want
-   * to copy whole scenes. We have to come up with a proper idea of how to copy and
-   * paste scene strips.
+  /* Nullify all ID pointers that should not be copied. For example, don't copy whole scenes (how
+   * to copy and paste scene strips is not clear currently).
+   *
+   * The other ID pointers should be remapped to their added counterparts in the temp paste buffer
+   * Main.
    */
   blender::bke::id::IDRemapper id_remapper;
+  id_remapper.add(&scene_src->id, &scene_dst->id);
+  auto gather_strip_data_ids_dependencies =
+      [&copy_buffer, &id_remapper](LibraryIDLinkCallbackData *cb_data) -> int {
+    ID *id_src = *cb_data->id_pointer;
+
+    /* Embedded or null IDs usages can be ignored here. */
+    if (cb_data->cb_flag & (IDWALK_CB_EMBEDDED | IDWALK_CB_EMBEDDED_NOT_OWNING)) {
+      return IDWALK_RET_NOP;
+    }
+    if (!id_src) {
+      return IDWALK_RET_NOP;
+    }
+
+    ID_Type id_type = GS((id_src)->name);
+    /* Only add (and follow) IDs which usage is marked as 'never null', or are from following
+     * types: #bSound, #MovieClip, #Image, #Text, #VFont, #bAction. */
+    if (ELEM(id_type, ID_SO, ID_MC, ID_IM, ID_TXT, ID_VF, ID_AC) ||
+        (cb_data->cb_flag & IDWALK_CB_NEVER_NULL))
+    {
+      ID *id_dst = id_src;  // copy_buffer.id_add(id_src,
+                            // blender::bke::blendfile::PartialWriteContext::NOP);
+      /* It's likely that the same used ID is processed more than once, using `add_overwrite`
+       * here ensures that it will be remapped to its valid copy in the paste buffer, and not to
+       * `null`, in case it was first processed as a 'non-remapping` case. */
+      id_remapper.add_overwrite(id_src, id_dst);
+    }
+    else {
+      id_remapper.add(id_src, nullptr);
+      return IDWALK_RET_STOP_RECURSION;
+    }
+    return IDWALK_RET_NOP;
+  };
   BKE_library_foreach_ID_link(
-      bmain_src, &scene_dst->id, gather_strip_data_ids_to_null, &id_remapper, IDWALK_RECURSE);
+      nullptr, &scene_dst->id, gather_strip_data_ids_dependencies, nullptr, IDWALK_RECURSE);
 
-  BKE_libblock_relink_multiple(bmain_src,
-                               {&scene_dst->id},
-                               ID_REMAP_TYPE_REMAP,
-                               id_remapper,
-                               (ID_REMAP_SKIP_USER_CLEAR | ID_REMAP_SKIP_USER_REFCOUNT));
+  BKE_libblock_remap_multiple_raw(&copy_buffer, id_remapper, ID_REMAP_SKIP_USER_CLEAR);
 
-  /* Ensure that there are no old copy tags around */
-  BKE_blendfile_write_partial_begin(bmain_src);
-  /* Tag the scene copy so we can pull in all scrip dependencies. */
-  BKE_copybuffer_copy_tag_ID(&scene_dst->id);
-  /* Create the copy/paste temp file */
-  bool retval = BKE_copybuffer_copy_end(bmain_src, filepath, reports);
+  BLI_assert(copy_buffer.is_valid());
 
-  /* Clean up the action ID if we created any. */
-  if (scene_dst->adt != nullptr && scene_dst->adt->action != nullptr) {
-    BKE_id_delete(bmain_src, scene_dst->adt->action);
-  }
-
-  /* Cleanup the dummy scene file */
-  BKE_id_delete(bmain_src, scene_dst);
+  const bool retval = copy_buffer.write(filepath, reports);
 
   return retval;
 }
@@ -224,7 +221,7 @@ int sequencer_clipboard_copy_exec(bContext *C, wmOperator *op)
 
   char filepath[FILE_MAX];
   sequencer_copybuffer_filepath_get(filepath, sizeof(filepath));
-  bool success = sequencer_write_copy_paste_file(bmain, scene, filepath, op->reports);
+  bool success = sequencer_write_copy_paste_file(bmain, scene, filepath, *op->reports);
   if (!success) {
     BKE_report(op->reports, RPT_ERROR, "Could not create the copy paste file!");
     return OPERATOR_CANCELLED;

@@ -7,13 +7,22 @@
  * \ingroup bke
  */
 
+#include "BKE_main.hh"
+
+#include "BLI_function_ref.hh"
+#include "BLI_map.hh"
+
+#include <string>
+
 struct bContext;
 struct BlendFileData;
 struct BlendFileReadParams;
 struct BlendFileReadReport;
 struct BlendFileReadWMSetupData;
 struct ID;
-struct Main;
+struct IDNameLib_Map;
+struct Library;
+struct LibraryIDLinkCallbackData;
 struct MemFile;
 struct ReportList;
 struct UserDef;
@@ -141,7 +150,135 @@ WorkspaceConfigFileData *BKE_blendfile_workspace_config_read(const char *filepat
 bool BKE_blendfile_workspace_config_write(Main *bmain, const char *filepath, ReportList *reports);
 void BKE_blendfile_workspace_config_data_free(WorkspaceConfigFileData *workspace_config);
 
+namespace blender::bke::blendfile {
+
 /* Partial blend file writing. */
+class PartialWriteContext : public Main {
+  /**
+   * This mapping only contains entries for IDs in the context which have a known matching ID in
+   * current G_MAIN.
+   *
+   * It is used to avoid adding several time a same ID (e.g. as a dependency of several other added
+   * IDs).
+   */
+  IDNameLib_Map *matching_uid_map_;
+
+  /** A mapping from the absolute library paths to the #Library IDs in the context. */
+  blender::Map<std::string, Library *> libraries_map_;
+
+  /**
+   * In case an explicitely added ID has the same session_uid as an existing one in current
+   * context, the added one should be able to 'steal' that session_uid in the context, and
+   * re-assign a new one to the other ID.
+   */
+  void preempt_session_uid_(ID *ctx_id, unsigned int session_uid);
+  /** Utils for #PartialWriteContext::id_add, only adds (duplicate) the given source ID into
+   * current context. */
+  ID *id_add_copy_(const ID *id, const bool regenerate_session_uid);
+  void ensure_library_(ID *ctx_id);
+
+ public:
+  PartialWriteContext();
+  ~PartialWriteContext();
+  /* Delete regular copy constructor, such that only the default move copy constructor (and
+   * assignement operator) can be used. */
+  PartialWriteContext(const PartialWriteContext &) = delete;
+  PartialWriteContext(PartialWriteContext &&) = default;
+  PartialWriteContext &operator=(PartialWriteContext &&) = default;
+
+  /**
+   * Control how to handle IDs and their dependencies when they are added to this context.
+   *
+   * \note For linked IDs, if #MAKE_LOCAL is not used, the library ID opinter is _not_ considered
+   * nor hanlded as a regular dependency. Instead, the library is _always_ added to the context
+   * data, and never duplicated. Also, library matching always happens based on absolute filepath.
+   */
+  enum AddIDOptions {
+    /**
+     * Do not keep linked info (library and/or liboverride references).
+     *
+     * \warning By default, when #ADD_DEPENDENCIES is defined, this will also apply to all
+     * dependencies as well.
+     */
+    MAKE_LOCAL = 1 << 0,
+    /**
+     * Clear all dependency IDs that are not in the partial write context. Mutually exclusive with
+     * #ADD_DEPENDENCIES.
+     *
+     * WARNING: This also means that dependencies like obdata, shapekeys or actions are not
+     * duplicated either.
+     */
+    CLEAR_DEPENDENCIES = 1 << 8,
+    /**
+     * Also add (or reuse if already there) dependency IDs into the partial write context. Mutually
+     * exclusive with #CLEAR_DEPENDENCIES.
+     */
+    ADD_DEPENDENCIES = 1 << 9,
+    /**
+     * For each explicitely added IDs (i.e. these with a fake user), ensure all of their
+     * dependencies are independant copies, instead of being shared with other explicitely added
+     * IDs. Only relevant with #ADD_DEPENDENCIES.
+     *
+     * \warning Implies that the `session_uid` of these duplicated dependencies will be different
+     * than their source data.
+     */
+    DUPLICATE_DEPENDENCIES = 1 << 10,
+  };
+  /**
+   * Add a copy of the given ID to the partial write context.
+   *
+   * \note The duplicated ID will have the same session_uid as its source. In case a matching ID
+   * already exists in the context, it is returned instead of duplicating it again.
+   *
+   * \param options: Control how the added ID (and its dependencies) are handled. See
+   *                 #PartialWriteContext::AddIDOptions above for details.
+   * \param dependencies_filter_cb optional, a callback called for each ID usages. Currently, only
+   * accepted return values are #MAKE_LOCAL, and #ADD_DEPENDENCIES or #CLEAR_DEPENDENCIES.
+   *
+   * \return The pointer to the duplicated ID in the partial write context.
+   */
+  ID *id_add(const ID *id,
+             PartialWriteContext::AddIDOptions options,
+             blender::FunctionRef<PartialWriteContext::AddIDOptions(
+                 LibraryIDLinkCallbackData *cb_data, PartialWriteContext::AddIDOptions options)>
+                 dependencies_filter_cb = nullptr);
+
+  /**
+   * Remove the copy of the given ID from the partial write context.
+   *
+   * \note The search is based on the #ID.session_uid of the given ID. This means that if
+   * `duplicate_depencies` option was used when adding the ID, these independant dependencies
+   * duplicates cannot be removed directly from the context. Use #remove_unused for this.
+   *
+   * \note No dependencies will be removed. Use #remove_unused to remove all unused IDs from the
+   * current context.
+   */
+  void id_remove(const ID *id);
+
+  /**
+   * Remove all unused IDs from the current context.
+   */
+  void remove_unused(void);
+
+  /**
+   * Fully empty the partial write context.
+   */
+  void clear(void);
+
+  /**
+   * Debug: Check if the current partial write context is fully valid.
+   *
+   * Currently, check if any ID in the context still has relations to IDs not in the context.
+   *
+   * \return false if the context is invalid.
+   */
+  bool is_valid(void);
+
+  bool write(const char *filepath, int write_flags, int remap_mode, ReportList &reports);
+  bool write(const char *filepath, ReportList &reports);
+};
+
+}  // namespace blender::bke::blendfile
 
 void BKE_blendfile_write_partial_tag_ID(ID *id, bool set);
 void BKE_blendfile_write_partial_begin(Main *bmain_src);
