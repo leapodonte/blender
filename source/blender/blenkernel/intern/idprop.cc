@@ -357,7 +357,7 @@ static IDProperty *IDP_CopyArray(const IDProperty *prop, const int flag)
 IDProperty *IDP_NewStringMaxSize(const char *st,
                                  const size_t st_maxncpy,
                                  const char *name,
-                                 const short flags)
+                                 const eIDPropertyFlag flags)
 {
   IDProperty *prop = static_cast<IDProperty *>(
       MEM_callocN(sizeof(IDProperty), "IDProperty string"));
@@ -390,7 +390,7 @@ IDProperty *IDP_NewStringMaxSize(const char *st,
   return prop;
 }
 
-IDProperty *IDP_NewString(const char *st, const char *name, const short flags)
+IDProperty *IDP_NewString(const char *st, const char *name, const eIDPropertyFlag flags)
 {
   return IDP_NewStringMaxSize(st, 0, name, flags);
 }
@@ -985,7 +985,7 @@ bool IDP_EqualsProperties(const IDProperty *prop1, const IDProperty *prop2)
 IDProperty *IDP_New(const char type,
                     const IDPropertyTemplate *val,
                     const char *name,
-                    const short flags)
+                    const eIDPropertyFlag flags)
 {
   IDProperty *prop = nullptr;
 

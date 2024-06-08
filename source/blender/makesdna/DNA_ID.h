@@ -240,8 +240,12 @@ typedef enum eIDPropertyFlag {
    * This #IDProperty has a static type, i.e. its #eIDPropertyType cannot be changed by assigning a
    * new value to it.
    *
-   * \note Currently, all overridable IDProp are also statically typed.
-   * \note IDProps used as storage for dynamic RNA properties are also always dynamically typed.
+   * Currently, array len is also considered as fixed (i.e. part of the type) when this flag is
+   * set. This allows to avoid IDProperty storing vectors e.g. to see their length modified.
+   *
+   * \note Currently, all overridable IDProp are also statically typed. IDProps used as storage for
+   * dynamic RNA properties are also always dynamically typed.
+   *
    * \note Internal flag, user have no direct way to define or edit it.
    */
   IDP_FLAG_STATIC_TYPE = 1 << 4,

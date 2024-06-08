@@ -16,7 +16,7 @@ namespace blender::bke::idprop {
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       int32_t value,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   IDPropertyTemplate prop_template{0};
   prop_template.i = value;
@@ -26,7 +26,7 @@ std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_n
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create_bool(const StringRefNull prop_name,
                                                            bool value,
-                                                           const short flags)
+                                                           const eIDPropertyFlag flags)
 {
   IDPropertyTemplate prop_template{0};
   prop_template.i = value;
@@ -36,7 +36,7 @@ std::unique_ptr<IDProperty, IDPropertyDeleter> create_bool(const StringRefNull p
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       float value,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   IDPropertyTemplate prop_template{0};
   prop_template.f = value;
@@ -46,7 +46,7 @@ std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_n
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       double value,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   IDPropertyTemplate prop_template{0};
   prop_template.d = value;
@@ -56,7 +56,7 @@ std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_n
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       const StringRefNull value,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   IDProperty *property = IDP_NewString(value.c_str(), prop_name.c_str(), flags);
   return std::unique_ptr<IDProperty, IDPropertyDeleter>(property);
@@ -64,7 +64,7 @@ std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_n
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       ID *value,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   IDPropertyTemplate prop_template{0};
   prop_template.id = value;
@@ -75,7 +75,7 @@ std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_n
 static std::unique_ptr<IDProperty, IDPropertyDeleter> array_create(const StringRefNull prop_name,
                                                                    eIDPropertyType subtype,
                                                                    size_t array_len,
-                                                                   const short flags)
+                                                                   const eIDPropertyFlag flags)
 {
   IDPropertyTemplate prop_template{0};
   prop_template.array.len = array_len;
@@ -104,7 +104,7 @@ template<
     eIDPropertyType id_property_subtype>
 std::unique_ptr<IDProperty, IDPropertyDeleter> create_array(StringRefNull prop_name,
                                                             Span<PrimitiveType> values,
-                                                            const short flags)
+                                                            const eIDPropertyFlag flags)
 {
   static_assert(std::is_same_v<PrimitiveType, int32_t> || std::is_same_v<PrimitiveType, float> ||
                     std::is_same_v<PrimitiveType, double>,
@@ -127,27 +127,27 @@ std::unique_ptr<IDProperty, IDPropertyDeleter> create_array(StringRefNull prop_n
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       Span<int32_t> values,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   return create_array<int32_t, IDP_INT>(prop_name, values, flags);
 }
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       Span<float> values,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   return create_array<float, IDP_FLOAT>(prop_name, values, flags);
 }
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create(const StringRefNull prop_name,
                                                       Span<double> values,
-                                                      const short flags)
+                                                      const eIDPropertyFlag flags)
 {
   return create_array<double, IDP_DOUBLE>(prop_name, values, flags);
 }
 
 std::unique_ptr<IDProperty, IDPropertyDeleter> create_group(const StringRefNull prop_name,
-                                                            const short flags)
+                                                            const eIDPropertyFlag flags)
 {
   IDPropertyTemplate prop_template{0};
   IDProperty *property = IDP_New(IDP_GROUP, &prop_template, prop_name.c_str(), flags);

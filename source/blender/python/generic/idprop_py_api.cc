@@ -415,10 +415,15 @@ static const char *idp_try_read_name(PyObject *name_obj)
  *
  * \param prop_exist If not null, attempt to assign given `ob` value to this property first, and
  *                   only create a new one if not possible.
- * \param do_converion If `true`, allow some 'reasonable' conversion of input value to match the
- *                     `prop_exist` property type. E.g. can convert an `int` to a `float`, bot not
+ *                   If no assignement (or conversion and assignement) is possible, the current
+ *                   value remains unchanged.
+ *
+ * \param do_conversion If `true`, allow some 'reasonable' conversion of input value to match the
+ *                     `prop_exist` property type. E.g. can convert an `int` to a `float`, but not
  *                     the other way around.
+ *
  * \param can_create Whether creating a new IDProperty is allowed.
+ *
  * \return `prop_exist` if given and it could be assigned given `ob` value, a new IDProperty
  *         otherwise.
  */
@@ -708,9 +713,9 @@ static IDProperty *idp_from_PySequence_Fast(IDProperty *prop_exist,
   val.array.len = PySequence_Fast_GET_SIZE(ob);
 
   /* NOTE: For now do not consider resizing existing array property. Also do not handle IDPARRAY.
-   *         - Consider 'static type' also means 'fixed length' (e.g. vectors or matrices cases).
-   *         - For 'dynamic type' case, it's not really a problem if array properties get replaced
-   *           currently.
+   * - 'static type' also means 'fixed length' (e.g. vectors or matrices cases).
+   * - For 'dynamic type' case, it's not really a problem if array properties get replaced
+   * currently.
    */
   if (prop_exist && prop_exist->len == val.array.len) {
     switch (val.array.type) {
@@ -919,7 +924,7 @@ static IDProperty *idp_from_PyMapping(IDProperty * /* prop_exist */,
 {
   IDProperty *prop;
 
-  /* TODO: Handle editing in-place of existing property. */
+  /* TODO: Handle editing in-place of existing property (#IDP_FLAG_STATIC_TYPE flag). */
 
   PyObject *keys, *vals, *key, *pval;
   int i, len;
@@ -1049,9 +1054,10 @@ bool BPy_IDProperty_Map_ValidateAndCreate(PyObject *name_obj, IDProperty *group,
     BLI_assert(ELEM(prop, prop_exist, nullptr));
     if (prop != prop_exist) {
       PyErr_Format(PyExc_TypeError,
-                   "Cannot assign a %.200s value to the existing '%s' IDProperty",
+                   "Cannot assign a '%.200s' value to the existing '%s' %s IDProperty",
                    Py_TYPE(ob)->tp_name,
-                   name);
+                   name,
+                   IDP_type_str(prop_exist));
       return false;
     }
     return true;
