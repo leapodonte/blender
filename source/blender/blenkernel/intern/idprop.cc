@@ -385,7 +385,7 @@ IDProperty *IDP_NewStringMaxSize(const char *st,
 
   prop->type = IDP_STRING;
   STRNCPY(prop->name, name);
-  prop->flag = flags;
+  prop->flag = short(flags);
 
   return prop;
 }
@@ -1081,7 +1081,7 @@ IDProperty *IDP_New(const char type,
 
   prop->type = type;
   STRNCPY(prop->name, name);
-  prop->flag = flags;
+  prop->flag = short(flags);
 
   return prop;
 }
