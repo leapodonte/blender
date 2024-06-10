@@ -56,8 +56,8 @@ class BlExtPreferences(AddonPreferences):
     show_development_reports: BoolProperty(
         name="Show Development Reports",
         description=(
-            "Show the result of running commands in the main interface "
-            "this has the advantage that multiple processes that run at once have their errors properly grouped "
+            "Show the result of running commands in the main interface. "
+            "This has the advantage that multiple processes that run at once have their errors properly grouped, "
             "which is not the case for reports which are mixed together"
         ),
         default=False,
@@ -267,7 +267,7 @@ def repos_to_notify():
             bl_extension_ops.RepoItem(
                 name=repo_item.name,
                 directory=repo_directory,
-                source="" if repo_item.use_custom_directory else repo_item.source,
+                source="" if repo_item.use_remote_url else repo_item.source,
                 remote_url=remote_url,
                 module=repo_item.module,
                 use_cache=repo_item.use_cache,
@@ -291,6 +291,12 @@ def extenion_repos_sync(*_):
 
     print_debug("SYNC:", active_repo.name)
     # There may be nothing to upgrade.
+
+    # FIXME: don't use the operator, this is error prone.
+    # The same method used to update the status-bar on startup would be preferable.
+    if not bpy.ops.extensions.repo_sync_all.poll():
+        print("skipping sync, poll failed")
+        return
 
     from contextlib import redirect_stdout
     import io
