@@ -415,7 +415,7 @@ static const char *idp_try_read_name(PyObject *name_obj)
  *
  * \param prop_exist If not null, attempt to assign given `ob` value to this property first, and
  *                   only create a new one if not possible.
- *                   If no assignement (or conversion and assignement) is possible, the current
+ *                   If no assignment (or conversion and assignment) is possible, the current
  *                   value remains unchanged.
  *
  * \param do_conversion If `true`, allow some 'reasonable' conversion of input value to match the
@@ -548,7 +548,7 @@ static IDProperty *idp_from_PyLong(IDProperty *prop_exist,
 static IDProperty *idp_from_PyUnicode(IDProperty *prop_exist,
                                       const char *name,
                                       PyObject *ob,
-                                      const bool /* do_conversion */,
+                                      const bool /*do_conversion*/,
                                       const bool can_create)
 {
   IDProperty *prop = nullptr;
@@ -588,7 +588,7 @@ static IDProperty *idp_from_PyUnicode(IDProperty *prop_exist,
 static IDProperty *idp_from_PyBytes(IDProperty *prop_exist,
                                     const char *name,
                                     PyObject *ob,
-                                    const bool /* do_conversion */,
+                                    const bool /*do_conversion*/,
                                     const bool can_create)
 {
   IDProperty *prop = nullptr;
@@ -657,7 +657,7 @@ static IDProperty *idp_from_PySequence_Buffer(IDProperty *prop_exist,
                                               const char *name,
                                               Py_buffer &buffer,
                                               const int idp_type,
-                                              const bool /* do_conversion */,
+                                              const bool /*do_conversion*/,
                                               const bool can_create)
 {
   BLI_assert(idp_type != -1);
@@ -916,11 +916,11 @@ static IDProperty *idp_from_PySequence(IDProperty *prop_exist,
   return nullptr;
 }
 
-static IDProperty *idp_from_PyMapping(IDProperty * /* prop_exist */,
+static IDProperty *idp_from_PyMapping(IDProperty * /*prop_exist*/,
                                       const char *name,
                                       PyObject *ob,
-                                      const bool /* do_conversion */,
-                                      const bool /* can_create */)
+                                      const bool /*do_conversion*/,
+                                      const bool /*can_create*/)
 {
   IDProperty *prop;
 
@@ -959,7 +959,7 @@ static IDProperty *idp_from_PyMapping(IDProperty * /* prop_exist */,
 static IDProperty *idp_from_DatablockPointer(IDProperty *prop_exist,
                                              const char *name,
                                              PyObject *ob,
-                                             const bool /* do_conversion */,
+                                             const bool /*do_conversion*/,
                                              const bool can_create)
 {
   IDProperty *prop = nullptr;
@@ -1063,7 +1063,7 @@ bool BPy_IDProperty_Map_ValidateAndCreate(PyObject *name_obj, IDProperty *group,
     return true;
   }
 
-  /* Attempt to assign new value in existing IDProperty, if types (and potentailly subtypes) match
+  /* Attempt to assign new value in existing IDProperty, if types (and potentially subtypes) match
    * exactly. Otherwise, create a new IDProperty. */
   IDProperty *new_prop = idp_from_PyObject(prop_exist, name, ob, false, true);
   if (new_prop == nullptr) {
